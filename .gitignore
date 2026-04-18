@@ -1,0 +1,20 @@
+# WordPress / dev
+*.log
+*.bak
+*.backup
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*~
+
+# Build artifacts
+*.zip
