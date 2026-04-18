@@ -536,66 +536,171 @@ function cbv_no_cbv_error_notice() {
 // ============================================================
 // 5. INTEGRAÇÃO AUTOMÁTICA WPFORMS → CPT CLIENTES
 // ============================================================
+
+// Ganchos em múltiplos pontos da pipeline para maximizar chances de captura
 add_action( 'wpforms_process_complete', 'cbv_wpforms_to_cpt', 10, 4 );
+add_action( 'wpforms_process_entry_saved', 'cbv_wpforms_entry_saved_fallback', 10, 5 );
 
+/**
+ * Grava log de debug no banco (option cbv_wpforms_log).
+ * Mantém últimas 50 entradas.
+ */
+function cbv_log_wpforms( $message, $context = array() ) {
+    $log = get_option( 'cbv_wpforms_log', array() );
+    $log[] = array(
+        'time'    => current_time( 'mysql' ),
+        'message' => $message,
+        'context' => $context,
+    );
+    // Mantém só os últimos 50
+    if ( count( $log ) > 50 ) {
+        $log = array_slice( $log, -50 );
+    }
+    update_option( 'cbv_wpforms_log', $log, false );
+}
+
+/**
+ * Hook principal: wpforms_process_complete
+ */
 function cbv_wpforms_to_cpt( $fields, $entry, $form_data, $entry_id ) {
-    // ID do formulário "Cadastro CBV" - ajuste se necessário
-    $form_id = 5304;
+    $form_id_configured = 5304;
+    $received_form_id   = isset( $form_data['id'] ) ? absint( $form_data['id'] ) : 0;
 
-    if ( absint( $form_data['id'] ) !== $form_id ) {
+    cbv_log_wpforms( 'Hook wpforms_process_complete disparou', array(
+        'form_id_recebido'   => $received_form_id,
+        'form_id_esperado'   => $form_id_configured,
+        'entry_id'           => $entry_id,
+        'total_fields'       => is_array( $fields ) ? count( $fields ) : 0,
+    ) );
+
+    if ( $received_form_id !== $form_id_configured ) {
+        cbv_log_wpforms( 'Form ID diferente - ignorando', array( 'recebido' => $received_form_id ) );
         return;
     }
 
-    // Mapear campos do WPForms para o CPT
-    // IDs dos campos do formulário:
-    // 2 = Nome, 7 = WhatsApp, 9 = País, 5 = Estado (select), 11 = Estado (text)
-    // 3 = Instagram, 8 = Email, 1 = Certificado
-    // 13-40 = Cidades (condicionais por estado), 4 = Cidade (text)
+    cbv_create_formando_from_fields( $fields, $entry_id, 'wpforms_process_complete' );
+}
 
-    $nome      = isset( $fields[2]['value'] ) ? sanitize_text_field( $fields[2]['value'] ) : '';
-    $whatsapp  = isset( $fields[7]['value'] ) ? sanitize_text_field( $fields[7]['value'] ) : '';
-    $pais      = isset( $fields[9]['value'] ) ? sanitize_text_field( $fields[9]['value'] ) : '';
-    $instagram = isset( $fields[3]['value'] ) ? sanitize_text_field( $fields[3]['value'] ) : '';
-    $email     = isset( $fields[8]['value'] ) ? sanitize_email( $fields[8]['value'] ) : '';
+/**
+ * Fallback: wpforms_process_entry_saved
+ * Dispara quando a entrada é salva - usamos se o hook principal falhar.
+ */
+function cbv_wpforms_entry_saved_fallback( $fields, $entry, $form_data, $entry_id, $args = null ) {
+    // Evitar duplicação: se já existir um post com esse entry_id, ignorar
+    $form_id_configured = 5304;
+    $received_form_id   = isset( $form_data['id'] ) ? absint( $form_data['id'] ) : 0;
 
-    // Estado: pode vir do select (5) ou do text (11)
-    $estado = '';
-    if ( ! empty( $fields[5]['value'] ) ) {
-        $estado = sanitize_text_field( $fields[5]['value'] );
-    } elseif ( ! empty( $fields[11]['value'] ) ) {
-        $estado = sanitize_text_field( $fields[11]['value'] );
+    if ( $received_form_id !== $form_id_configured || ! $entry_id ) {
+        return;
     }
 
-    // Cidade: vem de um dos muitos selects condicionais ou do text (4)
+    // Verifica se já criou via hook principal
+    $existing = get_posts( array(
+        'post_type'   => 'clientes',
+        'post_status' => array( 'any', 'draft', 'pending', 'publish' ),
+        'meta_key'    => '_wpforms_entry_id',
+        'meta_value'  => $entry_id,
+        'numberposts' => 1,
+        'fields'      => 'ids',
+    ) );
+
+    if ( ! empty( $existing ) ) {
+        return;
+    }
+
+    cbv_log_wpforms( 'Fallback wpforms_process_entry_saved disparou', array( 'entry_id' => $entry_id ) );
+    cbv_create_formando_from_fields( $fields, $entry_id, 'wpforms_process_entry_saved' );
+}
+
+/**
+ * Função principal que cria o formando a partir dos campos.
+ * Chamada pelos hooks principal e fallback.
+ */
+function cbv_create_formando_from_fields( $fields, $entry_id, $source = '' ) {
+    if ( ! is_array( $fields ) ) {
+        cbv_log_wpforms( 'Fields não é array - abortado', array( 'source' => $source ) );
+        return false;
+    }
+
+    // Extrair valores usando busca inteligente (por label e por ID conhecido)
+    $nome      = cbv_find_field_value( $fields, array( 2 ), array( 'nome completo', 'nome' ) );
+    $whatsapp  = cbv_find_field_value( $fields, array( 7 ), array( 'whatsapp' ) );
+    $pais      = cbv_find_field_value( $fields, array( 9 ), array( 'pais', 'país' ) );
+    $instagram = cbv_find_field_value( $fields, array( 3 ), array( 'instagram' ) );
+    $email     = cbv_find_field_value( $fields, array( 8 ), array( 'e-mail', 'email' ) );
+
+    // Estado: pode vir do select (5) ou text (11)
+    $estado = cbv_find_field_value( $fields, array( 5, 11 ), array( 'estado' ) );
+
+    // Cidade: vem de muitos selects condicionais ou text (4)
     $cidade = '';
     $cidade_field_ids = array( 13, 14, 15, 16, 17, 18, 19, 20, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 4 );
     foreach ( $cidade_field_ids as $cid ) {
-        if ( ! empty( $fields[ $cid ]['value'] ) ) {
+        if ( isset( $fields[ $cid ]['value'] ) && ! empty( $fields[ $cid ]['value'] ) ) {
             $cidade = sanitize_text_field( $fields[ $cid ]['value'] );
             break;
         }
     }
+    // Fallback: procurar por label "cidade"
+    if ( empty( $cidade ) ) {
+        $cidade = cbv_find_field_value( $fields, array(), array( 'cidade' ) );
+    }
 
-    // Certificado (upload) - pegar URL do arquivo
+    // Certificado (upload)
     $certificado_url = '';
-    if ( ! empty( $fields[1]['value'] ) ) {
+    if ( isset( $fields[1]['value'] ) && ! empty( $fields[1]['value'] ) ) {
         $certificado_url = esc_url_raw( $fields[1]['value'] );
     }
-
-    // Se não tem nome, não cria a ficha
-    if ( empty( $nome ) ) {
-        return;
+    // Fallback: procurar campo do tipo file-upload
+    if ( empty( $certificado_url ) ) {
+        foreach ( $fields as $fid => $field ) {
+            if ( isset( $field['type'] ) && $field['type'] === 'file-upload' && ! empty( $field['value'] ) ) {
+                $certificado_url = esc_url_raw( $field['value'] );
+                break;
+            }
+            if ( isset( $field['value_raw'] ) && ! empty( $field['value_raw'] ) && isset( $field['name'] ) && stripos( $field['name'], 'certificad' ) !== false ) {
+                $certificado_url = esc_url_raw( is_array( $field['value_raw'] ) ? ( $field['value_raw'][0] ?? '' ) : $field['value_raw'] );
+                break;
+            }
+        }
     }
 
-    // Criar post no CPT clientes com status 'draft' (pendente)
-    $post_id = wp_insert_post( array(
-        'post_title'  => $nome,
-        'post_type'   => 'clientes',
-        'post_status' => 'draft',
+    cbv_log_wpforms( 'Valores extraídos', array(
+        'nome'       => $nome,
+        'email'      => $email,
+        'whatsapp'   => $whatsapp,
+        'pais'       => $pais,
+        'estado'     => $estado,
+        'cidade'     => $cidade,
+        'instagram'  => $instagram,
+        'cert_url'   => $certificado_url,
+        'source'     => $source,
     ) );
 
-    if ( is_wp_error( $post_id ) || ! $post_id ) {
-        return;
+    // Se não tem nome nem email, não cria a ficha
+    if ( empty( $nome ) && empty( $email ) ) {
+        cbv_log_wpforms( 'Sem nome nem email - abortado' );
+        return false;
+    }
+
+    // Título da ficha (fallback para email se não tiver nome)
+    $title = ! empty( $nome ) ? $nome : $email;
+
+    // Criar post
+    $post_id = wp_insert_post( array(
+        'post_title'  => $title,
+        'post_type'   => 'clientes',
+        'post_status' => 'draft',
+    ), true );
+
+    if ( is_wp_error( $post_id ) ) {
+        cbv_log_wpforms( 'Erro ao criar post', array( 'erro' => $post_id->get_error_message() ) );
+        return false;
+    }
+
+    if ( ! $post_id ) {
+        cbv_log_wpforms( 'wp_insert_post retornou 0' );
+        return false;
     }
 
     // Salvar meta dados
@@ -607,24 +712,73 @@ function cbv_wpforms_to_cpt( $fields, $entry, $form_data, $entry_id ) {
     update_post_meta( $post_id, 'nome_da_cidade', $cidade );
     update_post_meta( $post_id, 'instagram', $instagram );
     update_post_meta( $post_id, '_cbv_status', 'pendente' );
+    update_post_meta( $post_id, '_wpforms_entry_id', $entry_id );
 
-    // Certificado: tentar importar como attachment do WordPress
+    // Certificado
     if ( ! empty( $certificado_url ) ) {
         $attach_id = cbv_import_attachment_from_url( $certificado_url, $post_id );
         if ( $attach_id ) {
             update_post_meta( $post_id, 'certificado', $attach_id );
+            cbv_log_wpforms( 'Certificado importado como attachment', array( 'attach_id' => $attach_id ) );
         } else {
-            // Salvar URL diretamente como fallback
             update_post_meta( $post_id, 'certificado_url', $certificado_url );
+            cbv_log_wpforms( 'Certificado salvo como URL externa', array( 'url' => $certificado_url ) );
         }
     }
 
-    // Salvar referência do entry_id do WPForms
-    update_post_meta( $post_id, '_wpforms_entry_id', $entry_id );
-
-    // Atribuir taxonomias automaticamente
+    // Sincronizar taxonomias
     cbv_sync_taxonomies( $post_id );
+
+    cbv_log_wpforms( 'Ficha criada com sucesso', array(
+        'post_id'  => $post_id,
+        'title'    => $title,
+        'entry_id' => $entry_id,
+        'source'   => $source,
+    ) );
+
+    return $post_id;
 }
+
+/**
+ * Busca valor de campo por ID conhecido OU por label (case-insensitive).
+ */
+function cbv_find_field_value( $fields, $ids = array(), $label_keywords = array() ) {
+    // Primeiro tenta pelos IDs conhecidos
+    foreach ( $ids as $id ) {
+        if ( isset( $fields[ $id ]['value'] ) && ! empty( $fields[ $id ]['value'] ) ) {
+            $value = $fields[ $id ]['value'];
+            return is_email( $value ) ? sanitize_email( $value ) : sanitize_text_field( $value );
+        }
+    }
+
+    // Fallback: procura por label
+    if ( ! empty( $label_keywords ) ) {
+        foreach ( $fields as $field ) {
+            if ( ! isset( $field['name'] ) || ! isset( $field['value'] ) || empty( $field['value'] ) ) {
+                continue;
+            }
+            $label_lower = strtolower( $field['name'] );
+            foreach ( $label_keywords as $keyword ) {
+                if ( strpos( $label_lower, strtolower( $keyword ) ) !== false ) {
+                    $value = $field['value'];
+                    return is_email( $value ) ? sanitize_email( $value ) : sanitize_text_field( $value );
+                }
+            }
+        }
+    }
+
+    return '';
+}
+
+/**
+ * Cria uma ficha a partir dos dados originais (mantido para compatibilidade).
+ */
+if ( ! function_exists( 'cbv_wpforms_legacy_create' ) ) :
+function cbv_wpforms_legacy_create( $fields, $entry, $form_data, $entry_id ) {
+    // Stub mantido para evitar erros caso haja referência antiga
+    return cbv_wpforms_to_cpt( $fields, $entry, $form_data, $entry_id );
+}
+endif;
 
 /**
  * Importar arquivo de URL como attachment do WordPress
@@ -1180,4 +1334,196 @@ function cbv_save_quick_edit( $post_id, $post ) {
 
     // Sincronizar taxonomias também
     cbv_sync_taxonomies( $post_id );
+}
+
+// ============================================================
+// 12. PÁGINA DE DEBUG/FERRAMENTAS WPFORMS
+// ============================================================
+add_action( 'admin_menu', 'cbv_add_tools_submenu' );
+
+function cbv_add_tools_submenu() {
+    add_submenu_page(
+        'edit.php?post_type=clientes',
+        'Ferramentas WPForms',
+        'Ferramentas WPForms',
+        'manage_options',
+        'cbv-wpforms-tools',
+        'cbv_render_tools_page'
+    );
+}
+
+function cbv_render_tools_page() {
+    // Processar ações
+    if ( isset( $_POST['cbv_action'] ) && check_admin_referer( 'cbv_tools' ) ) {
+        $action = sanitize_text_field( $_POST['cbv_action'] );
+
+        if ( $action === 'clear_log' ) {
+            delete_option( 'cbv_wpforms_log' );
+            echo '<div class="notice notice-success"><p>Log limpo.</p></div>';
+        }
+
+        if ( $action === 'import_old' ) {
+            $count = cbv_import_old_wpforms_entries();
+            echo '<div class="notice notice-success"><p>Importação concluída. Fichas criadas: <strong>' . intval( $count ) . '</strong></p></div>';
+        }
+
+        if ( $action === 'test_hook' ) {
+            // Simula uma chamada do hook com dados fake
+            $fake_fields = array(
+                2 => array( 'name' => 'Qual seu nome completo?', 'value' => 'TESTE MANUAL ' . time() ),
+                8 => array( 'name' => 'Email', 'value' => 'teste' . time() . '@example.com' ),
+                9 => array( 'name' => 'País', 'value' => 'Brasil' ),
+                5 => array( 'name' => 'Estado', 'value' => 'São Paulo - SP' ),
+            );
+            $result = cbv_create_formando_from_fields( $fake_fields, 'TEST_' . time(), 'manual_test' );
+            if ( $result ) {
+                echo '<div class="notice notice-success"><p>Teste OK! Ficha criada com ID <strong>' . intval( $result ) . '</strong></p></div>';
+            } else {
+                echo '<div class="notice notice-error"><p>Falha ao criar ficha de teste. Veja os logs abaixo.</p></div>';
+            }
+        }
+    }
+
+    $log = get_option( 'cbv_wpforms_log', array() );
+    $log = array_reverse( $log ); // Mais recentes primeiro
+
+    // Checar se WPForms está ativo
+    $wpforms_active = class_exists( 'WPForms' ) || function_exists( 'wpforms' );
+
+    // Contar entradas WPForms (se possível)
+    $entries_count = 0;
+    if ( function_exists( 'wpforms' ) ) {
+        global $wpdb;
+        $table = $wpdb->prefix . 'wpforms_entries';
+        $exists = $wpdb->get_var( "SHOW TABLES LIKE '$table'" ) === $table;
+        if ( $exists ) {
+            $entries_count = (int) $wpdb->get_var( "SELECT COUNT(*) FROM $table WHERE form_id = 5304" );
+        }
+    }
+
+    // Contar fichas já importadas do WPForms
+    global $wpdb;
+    $imported_count = (int) $wpdb->get_var(
+        "SELECT COUNT(*) FROM {$wpdb->postmeta} pm
+         INNER JOIN {$wpdb->posts} p ON p.ID = pm.post_id
+         WHERE pm.meta_key = '_wpforms_entry_id'
+         AND p.post_type = 'clientes'"
+    );
+
+    ?>
+    <div class="wrap">
+        <h1>Ferramentas WPForms - CBV</h1>
+
+        <div class="notice notice-info inline">
+            <p>
+                <strong>WPForms ativo:</strong> <?php echo $wpforms_active ? '✓ Sim' : '✗ Não'; ?><br>
+                <strong>Entradas no WPForms (form 5304):</strong> <?php echo $entries_count; ?><br>
+                <strong>Fichas já importadas:</strong> <?php echo $imported_count; ?>
+            </p>
+        </div>
+
+        <div style="display:flex; gap:20px; margin-top:20px;">
+
+            <div class="card" style="padding:20px; flex:1;">
+                <h2>Testar o Hook</h2>
+                <p>Cria uma ficha de teste diretamente (sem precisar submeter o formulário). Se funcionar aqui mas não pelo formulário, o problema está no hook do WPForms.</p>
+                <form method="post">
+                    <?php wp_nonce_field( 'cbv_tools' ); ?>
+                    <input type="hidden" name="cbv_action" value="test_hook">
+                    <button type="submit" class="button button-primary">Criar ficha de teste</button>
+                </form>
+            </div>
+
+            <div class="card" style="padding:20px; flex:1;">
+                <h2>Importar entradas antigas</h2>
+                <p>Cria fichas para <strong>todas as entradas</strong> existentes no WPForms que ainda não foram importadas. Seguro de rodar várias vezes (não duplica).</p>
+                <form method="post" onsubmit="return confirm('Isso vai criar fichas para todas as entradas ainda não importadas. Continuar?');">
+                    <?php wp_nonce_field( 'cbv_tools' ); ?>
+                    <input type="hidden" name="cbv_action" value="import_old">
+                    <button type="submit" class="button button-primary">Importar entradas não-importadas</button>
+                </form>
+            </div>
+
+        </div>
+
+        <h2 style="margin-top:30px;">Logs (últimos 50 eventos)</h2>
+        <form method="post" style="margin-bottom:10px;">
+            <?php wp_nonce_field( 'cbv_tools' ); ?>
+            <input type="hidden" name="cbv_action" value="clear_log">
+            <button type="submit" class="button">Limpar log</button>
+        </form>
+
+        <?php if ( empty( $log ) ) : ?>
+            <p><em>Nenhum log registrado ainda. Submeta um formulário e recarregue esta página.</em></p>
+        <?php else : ?>
+            <table class="widefat striped">
+                <thead>
+                    <tr>
+                        <th style="width:160px;">Data/Hora</th>
+                        <th>Mensagem</th>
+                        <th>Contexto</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php foreach ( $log as $entry ) : ?>
+                        <tr>
+                            <td><?php echo esc_html( $entry['time'] ); ?></td>
+                            <td><strong><?php echo esc_html( $entry['message'] ); ?></strong></td>
+                            <td><pre style="margin:0; font-size:11px; white-space:pre-wrap;"><?php echo esc_html( wp_json_encode( $entry['context'], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE ) ); ?></pre></td>
+                        </tr>
+                    <?php endforeach; ?>
+                </tbody>
+            </table>
+        <?php endif; ?>
+    </div>
+    <?php
+}
+
+/**
+ * Importa entradas antigas do WPForms que ainda não viraram fichas.
+ */
+function cbv_import_old_wpforms_entries() {
+    if ( ! function_exists( 'wpforms' ) ) {
+        cbv_log_wpforms( 'Importação antiga: WPForms não está ativo' );
+        return 0;
+    }
+
+    global $wpdb;
+    $entries_table = $wpdb->prefix . 'wpforms_entries';
+    $fields_table  = $wpdb->prefix . 'wpforms_entry_fields';
+
+    // Buscar entradas do form 5304 que ainda não foram importadas
+    $query = "
+        SELECT e.entry_id, e.fields
+        FROM {$entries_table} e
+        WHERE e.form_id = 5304
+        AND e.entry_id NOT IN (
+            SELECT meta_value FROM {$wpdb->postmeta}
+            WHERE meta_key = '_wpforms_entry_id'
+        )
+        LIMIT 500
+    ";
+
+    $entries = $wpdb->get_results( $query );
+    $count = 0;
+
+    if ( empty( $entries ) ) {
+        cbv_log_wpforms( 'Importação antiga: nenhuma entrada pendente' );
+        return 0;
+    }
+
+    foreach ( $entries as $entry ) {
+        $fields_data = json_decode( $entry->fields, true );
+        if ( ! is_array( $fields_data ) ) {
+            continue;
+        }
+
+        $result = cbv_create_formando_from_fields( $fields_data, $entry->entry_id, 'import_old' );
+        if ( $result ) {
+            $count++;
+        }
+    }
+
+    cbv_log_wpforms( 'Importação antiga concluída', array( 'importadas' => $count, 'total_candidatas' => count( $entries ) ) );
+    return $count;
 }
