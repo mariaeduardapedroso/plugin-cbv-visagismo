@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CBV Approval Email
  * Description: Envia email automático ao aluno quando a ficha dele é aprovada pelo admin. Complementa o plugin CBV Formandos Manager.
- * Version: 1.0.0
+ * Version: 1.1.0
  * Author: Visage Education
  * Text Domain: cbv-approval-email
  */
@@ -11,11 +11,12 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'CBV_AE_VERSION', '1.0.0' );
+define( 'CBV_AE_VERSION', '1.1.0' );
 define( 'CBV_AE_OPTION', 'cbv_approval_email_settings' );
 define( 'CBV_AE_LOG_OPTION', 'cbv_approval_email_log' );
 define( 'CBV_AE_META_SENT', '_cbv_approval_email_sent_count' );
 define( 'CBV_AE_META_LAST_SENT', '_cbv_approval_email_last_sent' );
+define( 'CBV_AE_META_NOTIFIED', '_cbv_last_notified_status' );
 
 // ============================================================
 // SETTINGS & LOG
@@ -56,23 +57,23 @@ function cbv_ae_log( $entry ) {
 /**
  * Captura o status ANTES do save para comparar com o novo.
  */
-add_action( 'pre_post_update', 'cbv_ae_capture_old_status', 10, 2 );
-
-function cbv_ae_capture_old_status( $post_id, $data ) {
-    if ( ! isset( $data['post_type'] ) || $data['post_type'] !== 'clientes' ) {
-        return;
-    }
-    $old_status = get_post_meta( $post_id, '_cbv_status', true );
-    set_transient( 'cbv_ae_old_status_' . $post_id, $old_status, 60 );
-}
-
 /**
- * Hook principal: detecta mudança de _cbv_status para 'aprovado'.
- * Prioridade 100 para rodar DEPOIS de todos os outros saves.
+ * Hook principal: detecta mudança de _cbv_status para 'aprovado'
+ * e envia email UMA VEZ por transição.
+ *
+ * Usa meta persistente `_cbv_last_notified_status` para rastrear estado,
+ * em vez de transient (que tinha problemas com saves aninhados).
+ *
+ * Regra (Opção B - manda toda vez que aprovar):
+ * - Status mudou para 'aprovado' E flag != 'aprovado'  → ENVIA, seta flag
+ * - Status já é 'aprovado' E flag == 'aprovado'        → NÃO envia (evita duplicado)
+ * - Status mudou para outro (rejeitado/pendente)       → apaga a flag (próxima aprovação dispara)
+ *
+ * Prioridade 100 para rodar DEPOIS de todos os outros handlers.
  */
-add_action( 'save_post_clientes', 'cbv_ae_on_approval', 100, 3 );
+add_action( 'save_post_clientes', 'cbv_ae_check_approval_notification', 100, 3 );
 
-function cbv_ae_on_approval( $post_id, $post, $update ) {
+function cbv_ae_check_approval_notification( $post_id, $post, $update ) {
     // Evitar autosave/revisions
     if ( defined( 'DOING_AUTOSAVE' ) && DOING_AUTOSAVE ) {
         return;
@@ -86,29 +87,34 @@ function cbv_ae_on_approval( $post_id, $post, $update ) {
         return;
     }
 
-    $settings = cbv_ae_get_settings();
+    $settings      = cbv_ae_get_settings();
+    $current       = get_post_meta( $post_id, '_cbv_status', true );
+    $last_notified = get_post_meta( $post_id, CBV_AE_META_NOTIFIED, true );
+
+    // Se status atual NÃO é 'aprovado', resetar a flag (próxima aprovação dispara)
+    if ( $current !== 'aprovado' ) {
+        if ( ! empty( $last_notified ) ) {
+            delete_post_meta( $post_id, CBV_AE_META_NOTIFIED );
+        }
+        return;
+    }
+
+    // Status é 'aprovado'
 
     // CAMADA 1: Desativado por padrão
     if ( empty( $settings['enabled'] ) ) {
         return;
     }
 
-    // CAMADA 2: Só em transição REAL para aprovado
-    $new_status = get_post_meta( $post_id, '_cbv_status', true );
-    if ( $new_status !== 'aprovado' ) {
+    // CAMADA 2: Se já notificamos para este "aprovado", não duplica
+    if ( $last_notified === 'aprovado' ) {
         return;
-    }
-
-    $old_status = get_transient( 'cbv_ae_old_status_' . $post_id );
-    delete_transient( 'cbv_ae_old_status_' . $post_id );
-
-    if ( $old_status === 'aprovado' ) {
-        return; // já estava aprovado, não é transição
     }
 
     // CAMADA 3: Exclui fichas criadas pelo CSV Sync
     $source = get_post_meta( $post_id, '_cbv_source', true );
     if ( $source === 'csv_sync' ) {
+        update_post_meta( $post_id, CBV_AE_META_NOTIFIED, 'aprovado' );
         cbv_ae_log( array(
             'post_id' => $post_id,
             'email'   => get_post_meta( $post_id, 'email', true ),
@@ -118,7 +124,11 @@ function cbv_ae_on_approval( $post_id, $post, $update ) {
         return;
     }
 
-    cbv_ae_send_approval( $post_id );
+    // Enviar!
+    $result = cbv_ae_send_approval( $post_id );
+    if ( ! is_wp_error( $result ) ) {
+        update_post_meta( $post_id, CBV_AE_META_NOTIFIED, 'aprovado' );
+    }
 }
 
 /**
