@@ -537,9 +537,8 @@ function cbv_no_cbv_error_notice() {
 // 5. INTEGRAÇÃO AUTOMÁTICA WPFORMS → CPT CLIENTES
 // ============================================================
 
-// Ganchos em múltiplos pontos da pipeline para maximizar chances de captura
+// Gancho único para evitar duplicação (versão anterior tinha dois hooks e duplicava)
 add_action( 'wpforms_process_complete', 'cbv_wpforms_to_cpt', 10, 4 );
-add_action( 'wpforms_process_entry_saved', 'cbv_wpforms_entry_saved_fallback', 10, 5 );
 
 /**
  * Grava log de debug no banco (option cbv_wpforms_log).
@@ -582,39 +581,8 @@ function cbv_wpforms_to_cpt( $fields, $entry, $form_data, $entry_id ) {
 }
 
 /**
- * Fallback: wpforms_process_entry_saved
- * Dispara quando a entrada é salva - usamos se o hook principal falhar.
- */
-function cbv_wpforms_entry_saved_fallback( $fields, $entry, $form_data, $entry_id, $args = null ) {
-    // Evitar duplicação: se já existir um post com esse entry_id, ignorar
-    $form_id_configured = 5304;
-    $received_form_id   = isset( $form_data['id'] ) ? absint( $form_data['id'] ) : 0;
-
-    if ( $received_form_id !== $form_id_configured || ! $entry_id ) {
-        return;
-    }
-
-    // Verifica se já criou via hook principal
-    $existing = get_posts( array(
-        'post_type'   => 'clientes',
-        'post_status' => array( 'any', 'draft', 'pending', 'publish' ),
-        'meta_key'    => '_wpforms_entry_id',
-        'meta_value'  => $entry_id,
-        'numberposts' => 1,
-        'fields'      => 'ids',
-    ) );
-
-    if ( ! empty( $existing ) ) {
-        return;
-    }
-
-    cbv_log_wpforms( 'Fallback wpforms_process_entry_saved disparou', array( 'entry_id' => $entry_id ) );
-    cbv_create_formando_from_fields( $fields, $entry_id, 'wpforms_process_entry_saved' );
-}
-
-/**
  * Função principal que cria o formando a partir dos campos.
- * Chamada pelos hooks principal e fallback.
+ * Chamada pelo hook wpforms_process_complete.
  */
 function cbv_create_formando_from_fields( $fields, $entry_id, $source = '' ) {
     if ( ! is_array( $fields ) ) {
