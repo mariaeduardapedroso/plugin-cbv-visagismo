@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CBV Formandos Manager
  * Description: Gerencia o cadastro e aprovação de formandos da Formação Barbeiro Visagista (CBV).
- * Version: 1.1.0
+ * Version: 1.2.0
  * Author: Visage Education
  * Text Domain: cbv-formandos
  * Domain Path: /languages
@@ -14,7 +14,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 define( 'CBV_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'CBV_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
-define( 'CBV_VERSION', '1.1.0' );
+define( 'CBV_VERSION', '1.2.0' );
 
 // ============================================================
 // GERAÇÃO AUTOMÁTICA DE CBV ÚNICO
@@ -1110,13 +1110,16 @@ function cbv_handle_quick_action() {
                 wp_redirect( admin_url( 'edit.php?post_type=clientes&cbv_msg=no_cbv' ) );
                 exit;
             }
-            wp_update_post( array( 'ID' => $post_id, 'post_status' => 'publish' ) );
+            // Ordem importante: atualizar _cbv_status ANTES de wp_update_post
+            // para que hooks de save_post (ex: plugin cbv-approval-email) vejam
+            // o status correto ao rodar.
             update_post_meta( $post_id, '_cbv_status', 'aprovado' );
+            wp_update_post( array( 'ID' => $post_id, 'post_status' => 'publish' ) );
             break;
 
         case 'rejeitar':
-            wp_update_post( array( 'ID' => $post_id, 'post_status' => 'draft' ) );
             update_post_meta( $post_id, '_cbv_status', 'rejeitado' );
+            wp_update_post( array( 'ID' => $post_id, 'post_status' => 'draft' ) );
             break;
     }
 
