@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CBV Approval Email
  * Description: Envia email automático ao aluno quando a ficha dele é aprovada pelo admin. Complementa o plugin CBV Formandos Manager.
- * Version: 1.1.0
+ * Version: 1.2.0
  * Author: Visage Education
  * Text Domain: cbv-approval-email
  */
@@ -11,7 +11,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'CBV_AE_VERSION', '1.1.0' );
+define( 'CBV_AE_VERSION', '1.2.0' );
 define( 'CBV_AE_OPTION', 'cbv_approval_email_settings' );
 define( 'CBV_AE_LOG_OPTION', 'cbv_approval_email_log' );
 define( 'CBV_AE_META_SENT', '_cbv_approval_email_sent_count' );
@@ -31,7 +31,31 @@ function cbv_ae_get_settings() {
         'from_email'   => get_option( 'admin_email' ),
         'from_name'    => 'Visage Education',
         'subject'      => 'Sua certificação CBV foi aprovada!',
-        'message'      => "Olá {nome},\n\nParabéns! Sua certificação como Barbeiro Visagista foi aprovada pela Visage Education.\n\nSeu número CBV: {cbv}\n\nVocê já pode consultar sua certificação em:\nhttps://visageducation.com/formandos/\n\nAtenciosamente,\nEquipe Visage Education",
+        'message'      => '<div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; color: #333;">
+    <h2 style="color: #1822DC; margin-bottom: 20px;">Parabéns, {nome}!</h2>
+
+    <p style="font-size: 16px; line-height: 1.6;">
+        Sua certificação como <strong>Barbeiro Visagista</strong> foi aprovada pela <strong>Visage Education</strong>.
+    </p>
+
+    <div style="background: #f5f5f5; padding: 15px; border-left: 4px solid #1822DC; margin: 25px 0;">
+        <p style="margin: 0; font-size: 14px; color: #666;">Seu número CBV:</p>
+        <p style="margin: 5px 0 0; font-size: 22px; font-weight: bold; color: #1822DC;">{cbv}</p>
+    </div>
+
+    <p style="text-align: center; margin-top: 30px;">
+        <a href="https://visageducation.com/formandos/" style="background: #1822DC; color: #fff; padding: 12px 24px; text-decoration: none; border-radius: 5px; display: inline-block;">
+            Ver minha certificação
+        </a>
+    </p>
+
+    <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+
+    <p style="text-align: center; color: #999; font-size: 12px;">
+        Atenciosamente,<br>
+        <strong>Equipe Visage Education</strong>
+    </p>
+</div>',
         'activated_at' => 0,
     );
     $saved = get_option( CBV_AE_OPTION, array() );
@@ -172,7 +196,7 @@ function cbv_ae_send_approval( $post_id, $test_email = '' ) {
         $from_name = $settings['from_name'] ?: 'Visage Education';
         $headers[] = 'From: ' . $from_name . ' <' . $settings['from_email'] . '>';
     }
-    $headers[] = 'Content-Type: text/plain; charset=UTF-8';
+    $headers[] = 'Content-Type: text/html; charset=UTF-8';
 
     $sent = wp_mail( $email, $subject, $message, $headers );
 
@@ -347,9 +371,9 @@ function cbv_ae_render_page() {
                     </td>
                 </tr>
                 <tr>
-                    <th><label for="message">Mensagem</label></th>
+                    <th><label for="message">Mensagem (aceita HTML)</label></th>
                     <td>
-                        <textarea name="message" id="message" rows="12" class="large-text"><?php echo esc_textarea( $settings['message'] ); ?></textarea>
+                        <textarea name="message" id="message" rows="14" class="large-text code"><?php echo esc_textarea( $settings['message'] ); ?></textarea>
                         <p class="description">
                             <strong>Variáveis disponíveis:</strong>
                             <code>{nome}</code>
@@ -358,6 +382,11 @@ function cbv_ae_render_page() {
                             <code>{instagram}</code>
                             <code>{cidade}</code>
                             <code>{estado}</code>
+                        </p>
+                        <p class="description">
+                            <strong>Dica:</strong> você pode usar tags HTML como <code>&lt;h2&gt;</code>, <code>&lt;p&gt;</code>, <code>&lt;strong&gt;</code>, <code>&lt;a href=""&gt;</code>, <code>&lt;br&gt;</code>, <code>&lt;img&gt;</code>, etc.
+                            Para estilos use <code>style="..."</code> direto no elemento (ex: <code>&lt;p style="color: blue;"&gt;...&lt;/p&gt;</code>).
+                            Quebra de linha: use <code>&lt;br&gt;</code> ou <code>&lt;/p&gt;&lt;p&gt;</code>.
                         </p>
                     </td>
                 </tr>
@@ -449,14 +478,14 @@ function cbv_ae_send_test_with_fake_data( $test_email ) {
     );
 
     $subject = '[TESTE] ' . strtr( $settings['subject'], $replacements );
-    $message = "[Este é um email de teste com dados fictícios]\n\n" . strtr( $settings['message'], $replacements );
+    $message = '<p style="background:#fff3cd; color:#664d03; padding:10px; border-radius:4px; font-family:Arial,sans-serif;"><strong>[Este é um email de teste com dados fictícios]</strong></p>' . strtr( $settings['message'], $replacements );
 
     $headers = array();
     if ( ! empty( $settings['from_email'] ) && is_email( $settings['from_email'] ) ) {
         $from_name = $settings['from_name'] ?: 'Visage Education';
         $headers[] = 'From: ' . $from_name . ' <' . $settings['from_email'] . '>';
     }
-    $headers[] = 'Content-Type: text/plain; charset=UTF-8';
+    $headers[] = 'Content-Type: text/html; charset=UTF-8';
 
     $sent = wp_mail( $test_email, $subject, $message, $headers );
 
