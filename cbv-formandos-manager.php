@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CBV Formandos Manager
  * Description: Gerencia o cadastro e aprovação de formandos da Formação Barbeiro Visagista (CBV).
- * Version: 1.0.0
+ * Version: 1.1.0
  * Author: Visage Education
  * Text Domain: cbv-formandos
  * Domain Path: /languages
@@ -14,7 +14,44 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 define( 'CBV_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'CBV_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
-define( 'CBV_VERSION', '1.0.0' );
+define( 'CBV_VERSION', '1.1.0' );
+
+// ============================================================
+// GERAÇÃO AUTOMÁTICA DE CBV ÚNICO
+// ============================================================
+
+/**
+ * Gera um número CBV único no formato "CBV - XXXXXX" (6 dígitos).
+ * Tenta até 10 vezes encontrar um número que não exista no banco.
+ *
+ * @return string CBV único (ex: "CBV - 284594") ou '' se falhou em 10 tentativas
+ */
+function cbv_generate_unique_cbv() {
+    global $wpdb;
+    $max_attempts = 10;
+
+    for ( $i = 0; $i < $max_attempts; $i++ ) {
+        // Gera 6 dígitos aleatórios (entre 100000 e 999999)
+        $number = mt_rand( 100000, 999999 );
+        $cbv    = 'CBV - ' . $number;
+
+        // Verifica se já existe no banco
+        $exists = $wpdb->get_var( $wpdb->prepare(
+            "SELECT COUNT(*) FROM {$wpdb->postmeta}
+             WHERE meta_key = 'numero_do_cbv'
+             AND meta_value = %s",
+            $cbv
+        ) );
+
+        if ( intval( $exists ) === 0 ) {
+            return $cbv;
+        }
+    }
+
+    // Falhou em 10 tentativas - retorna vazio (log pra debug)
+    error_log( '[CBV Formandos] Falha ao gerar CBV unico apos ' . $max_attempts . ' tentativas.' );
+    return '';
+}
 
 // ============================================================
 // 1. REGISTRAR O CPT "CLIENTES"
@@ -453,6 +490,65 @@ function cbv_save_meta_data( $post_id, $post ) {
 }
 
 /**
+ * Auto-gera CBV único quando admin cria uma nova ficha pelo painel.
+ * Roda SOMENTE quando:
+ * - É uma ficha nova (menos de 2 minutos de idade)
+ * - Veio de submissão do meta box (tem nonce cbv_meta_nonce)
+ * - O CBV está vazio
+ * - Não foi criada pelo CSV Sync
+ * - Ainda não foi tentada geração para este post
+ */
+add_action( 'save_post_clientes', 'cbv_auto_generate_cbv_on_new', 15, 3 );
+
+function cbv_auto_generate_cbv_on_new( $post_id, $post, $update ) {
+    // Só processar submissões do meta box (tem nonce cbv_meta_nonce)
+    if ( ! isset( $_POST['cbv_meta_nonce'] ) || ! wp_verify_nonce( $_POST['cbv_meta_nonce'], 'cbv_save_meta' ) ) {
+        return;
+    }
+
+    if ( defined( 'DOING_AUTOSAVE' ) && DOING_AUTOSAVE ) {
+        return;
+    }
+    if ( wp_is_post_revision( $post_id ) || wp_is_post_autosave( $post_id ) ) {
+        return;
+    }
+
+    // Exclui fichas do CSV Sync
+    $source = get_post_meta( $post_id, '_cbv_source', true );
+    if ( $source === 'csv_sync' ) {
+        return;
+    }
+
+    // Se já tem CBV, não regera
+    $current_cbv = get_post_meta( $post_id, 'numero_do_cbv', true );
+    if ( ! empty( $current_cbv ) ) {
+        return;
+    }
+
+    // Evita regerar em edições subsequentes (flag de tentativa)
+    $attempted = get_post_meta( $post_id, '_cbv_auto_cbv_attempted', true );
+    if ( ! empty( $attempted ) ) {
+        return;
+    }
+
+    // Só gera se o post foi criado recentemente (até 2 minutos = provavelmente novo)
+    $post_time = get_post_time( 'U', true, $post_id );
+    $age       = time() - $post_time;
+    if ( $age > 120 ) {
+        return;
+    }
+
+    // Marca como tentativa feita (antes de gerar, para evitar re-entrada)
+    update_post_meta( $post_id, '_cbv_auto_cbv_attempted', '1' );
+
+    // Gerar CBV único
+    $generated_cbv = cbv_generate_unique_cbv();
+    if ( ! empty( $generated_cbv ) ) {
+        update_post_meta( $post_id, 'numero_do_cbv', $generated_cbv );
+    }
+}
+
+/**
  * Sincronizar meta fields com taxonomias
  */
 function cbv_sync_taxonomies( $post_id ) {
@@ -681,6 +777,15 @@ function cbv_create_formando_from_fields( $fields, $entry_id, $source = '' ) {
     update_post_meta( $post_id, 'instagram', $instagram );
     update_post_meta( $post_id, '_cbv_status', 'pendente' );
     update_post_meta( $post_id, '_wpforms_entry_id', $entry_id );
+
+    // Gerar CBV único automático (para fichas vindas do formulário)
+    $generated_cbv = cbv_generate_unique_cbv();
+    if ( ! empty( $generated_cbv ) ) {
+        update_post_meta( $post_id, 'numero_do_cbv', $generated_cbv );
+        cbv_log_wpforms( 'CBV gerado automaticamente', array( 'post_id' => $post_id, 'cbv' => $generated_cbv ) );
+    } else {
+        cbv_log_wpforms( 'Falha ao gerar CBV unico (10 tentativas)', array( 'post_id' => $post_id ) );
+    }
 
     // Certificado
     if ( ! empty( $certificado_url ) ) {
