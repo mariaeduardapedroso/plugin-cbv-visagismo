@@ -1,8 +1,8 @@
 <?php
 /**
- * Plugin Name: CBV Approval Email
- * Description: Envia email automático ao aluno quando a ficha dele é aprovada pelo admin. Complementa o plugin CBV Formandos Manager.
- * Version: 1.2.0
+ * Plugin Name: CBV Emails
+ * Description: Envia emails automáticos ao aluno - confirmação de submissão e aprovação. Complementa o plugin CBV Formandos Manager.
+ * Version: 1.3.0
  * Author: Visage Education
  * Text Domain: cbv-approval-email
  */
@@ -11,12 +11,13 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'CBV_AE_VERSION', '1.2.0' );
+define( 'CBV_AE_VERSION', '1.3.0' );
 define( 'CBV_AE_OPTION', 'cbv_approval_email_settings' );
 define( 'CBV_AE_LOG_OPTION', 'cbv_approval_email_log' );
 define( 'CBV_AE_META_SENT', '_cbv_approval_email_sent_count' );
 define( 'CBV_AE_META_LAST_SENT', '_cbv_approval_email_last_sent' );
 define( 'CBV_AE_META_NOTIFIED', '_cbv_last_notified_status' );
+define( 'CBV_AE_META_SUBMISSION_SENT', '_cbv_submission_email_sent' );
 
 // ============================================================
 // SETTINGS & LOG
@@ -57,6 +58,36 @@ function cbv_ae_get_settings() {
     </p>
 </div>',
         'activated_at' => 0,
+
+        // Email de submissão (quando ficha é criada)
+        'submission_enabled' => 0,
+        'submission_subject' => 'Recebemos seu cadastro CBV!',
+        'submission_message' => '<div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; color: #333;">
+    <h2 style="color: #1822DC; margin-bottom: 20px;">Olá, {nome}!</h2>
+
+    <p style="font-size: 16px; line-height: 1.6;">
+        Obrigado por enviar seu cadastro para obter o <strong>Código Barbeiro Visagista (CBV)</strong>.
+    </p>
+
+    <p style="font-size: 16px; line-height: 1.6;">
+        Seus dados foram recebidos com sucesso. Em até <strong>72 horas</strong> vamos analisar seu certificado e te retornaremos.
+    </p>
+
+    <div style="background: #f5f5f5; padding: 15px; border-left: 4px solid #1822DC; margin: 25px 0;">
+        <p style="margin: 0 0 10px; font-size: 14px; color: #666;"><strong>Dados enviados:</strong></p>
+        <p style="margin: 5px 0;">Nome: {nome}</p>
+        <p style="margin: 5px 0;">Email: {email}</p>
+        <p style="margin: 5px 0;">Cidade/Estado: {cidade} / {estado}</p>
+    </div>
+
+    <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+
+    <p style="text-align: center; color: #999; font-size: 12px;">
+        Atenciosamente,<br>
+        <strong>Equipe Visage Education</strong>
+    </p>
+</div>',
+        'submission_activated_at' => 0,
     );
     $saved = get_option( CBV_AE_OPTION, array() );
     return wp_parse_args( $saved, $defaults );
@@ -225,6 +256,102 @@ function cbv_ae_send_approval( $post_id, $test_email = '' ) {
 }
 
 // ============================================================
+// EMAIL DE CONFIRMAÇÃO DE SUBMISSÃO
+// Dispara quando o manager firar o evento 'cbv_formando_submitted'
+// (criado via formulário WPForms ou admin manual).
+// ============================================================
+add_action( 'cbv_formando_submitted', 'cbv_ae_send_submission_email', 10, 2 );
+
+function cbv_ae_send_submission_email( $post_id, $source = '' ) {
+    $settings = cbv_ae_get_settings();
+
+    // Se desativado, não faz nada
+    if ( empty( $settings['submission_enabled'] ) ) {
+        return;
+    }
+
+    // Exclui fichas do CSV Sync (defensivo - manager já filtra, mas por segurança)
+    $meta_source = get_post_meta( $post_id, '_cbv_source', true );
+    if ( $meta_source === 'csv_sync' ) {
+        return;
+    }
+
+    // Já enviou? Não duplica.
+    $already_sent = get_post_meta( $post_id, CBV_AE_META_SUBMISSION_SENT, true );
+    if ( ! empty( $already_sent ) ) {
+        return;
+    }
+
+    cbv_ae_send_submission( $post_id, '', $source );
+}
+
+/**
+ * Envia o email de confirmação de submissão.
+ */
+function cbv_ae_send_submission( $post_id, $test_email = '', $source = 'hook' ) {
+    $settings = cbv_ae_get_settings();
+
+    $nome   = get_post_meta( $post_id, 'nome_do_aluno', true );
+    $email  = $test_email ?: get_post_meta( $post_id, 'email', true );
+    $cidade = get_post_meta( $post_id, 'nome_da_cidade', true );
+    $estado = get_post_meta( $post_id, 'nome_do_estado', true );
+
+    if ( empty( $email ) || ! is_email( $email ) ) {
+        cbv_ae_log( array(
+            'post_id' => $post_id,
+            'email'   => $email,
+            'status'  => 'error',
+            'reason'  => 'Email inválido ou vazio (submissão).',
+        ) );
+        return new WP_Error( 'invalid_email', 'Email inválido' );
+    }
+
+    $replacements = array(
+        '{nome}'      => $nome,
+        '{email}'     => $email,
+        '{cidade}'    => $cidade,
+        '{estado}'    => $estado,
+        '{cbv}'       => get_post_meta( $post_id, 'numero_do_cbv', true ),
+        '{instagram}' => get_post_meta( $post_id, 'instagram', true ),
+    );
+
+    $subject = strtr( $settings['submission_subject'], $replacements );
+    $message = strtr( $settings['submission_message'], $replacements );
+
+    $headers = array();
+    if ( ! empty( $settings['from_email'] ) && is_email( $settings['from_email'] ) ) {
+        $from_name = $settings['from_name'] ?: 'Visage Education';
+        $headers[] = 'From: ' . $from_name . ' <' . $settings['from_email'] . '>';
+    }
+    $headers[] = 'Content-Type: text/html; charset=UTF-8';
+
+    $sent = wp_mail( $email, $subject, $message, $headers );
+
+    if ( $sent ) {
+        if ( ! $test_email ) {
+            update_post_meta( $post_id, CBV_AE_META_SUBMISSION_SENT, current_time( 'mysql' ) );
+        }
+        cbv_ae_log( array(
+            'post_id' => $post_id,
+            'email'   => $email,
+            'status'  => 'sent',
+            'reason'  => $test_email
+                ? 'Email de submissão de teste enviado.'
+                : 'Enviado automaticamente após submissão (' . $source . ').',
+        ) );
+        return true;
+    }
+
+    cbv_ae_log( array(
+        'post_id' => $post_id,
+        'email'   => $email,
+        'status'  => 'error',
+        'reason'  => 'wp_mail() retornou false (submissão). Verifique WP Mail SMTP.',
+    ) );
+    return new WP_Error( 'send_failed', 'wp_mail() falhou (submissão)' );
+}
+
+// ============================================================
 // ADMIN PAGE
 // ============================================================
 add_action( 'admin_menu', 'cbv_ae_add_menu' );
@@ -266,20 +393,31 @@ function cbv_ae_render_page() {
         $action = sanitize_text_field( $_POST['cbv_ae_action'] );
 
         if ( $action === 'save' ) {
+            $current = cbv_ae_get_settings();
+
             $new_settings = array(
+                // Aprovação
                 'enabled'    => isset( $_POST['enabled'] ) ? 1 : 0,
                 'from_email' => sanitize_email( wp_unslash( $_POST['from_email'] ?? '' ) ),
                 'from_name'  => sanitize_text_field( wp_unslash( $_POST['from_name'] ?? '' ) ),
                 'subject'    => sanitize_text_field( wp_unslash( $_POST['subject'] ?? '' ) ),
                 'message'    => wp_kses_post( wp_unslash( $_POST['message'] ?? '' ) ),
+                // Submissão
+                'submission_enabled' => isset( $_POST['submission_enabled'] ) ? 1 : 0,
+                'submission_subject' => sanitize_text_field( wp_unslash( $_POST['submission_subject'] ?? '' ) ),
+                'submission_message' => wp_kses_post( wp_unslash( $_POST['submission_message'] ?? '' ) ),
             );
 
-            $current = cbv_ae_get_settings();
-
+            // Timestamps de ativação
             if ( $new_settings['enabled'] && empty( $current['activated_at'] ) ) {
                 $new_settings['activated_at'] = time();
             } else {
                 $new_settings['activated_at'] = $current['activated_at'];
+            }
+            if ( $new_settings['submission_enabled'] && empty( $current['submission_activated_at'] ) ) {
+                $new_settings['submission_activated_at'] = time();
+            } else {
+                $new_settings['submission_activated_at'] = $current['submission_activated_at'] ?? 0;
             }
 
             update_option( CBV_AE_OPTION, $new_settings, false );
@@ -291,7 +429,7 @@ function cbv_ae_render_page() {
             if ( ! is_email( $test_email ) ) {
                 echo '<div class="notice notice-error"><p>Informe um email de teste válido.</p></div>';
             } else {
-                // Procura QUALQUER ficha (aprovada, pendente ou rascunho) para usar como base
+                // Procura QUALQUER ficha para usar como base
                 $sample_post = get_posts( array(
                     'post_type'   => 'clientes',
                     'post_status' => array( 'publish', 'draft', 'pending', 'any' ),
@@ -302,16 +440,44 @@ function cbv_ae_render_page() {
                 ) );
 
                 if ( empty( $sample_post ) ) {
-                    // Envia email de teste com dados falsos
                     $result = cbv_ae_send_test_with_fake_data( $test_email );
                 } else {
                     $result = cbv_ae_send_approval( $sample_post[0], $test_email );
                 }
 
                 if ( is_wp_error( $result ) ) {
-                    echo '<div class="notice notice-error"><p>Falha no envio: ' . esc_html( $result->get_error_message() ) . '</p></div>';
+                    echo '<div class="notice notice-error"><p>Falha no envio (aprovação): ' . esc_html( $result->get_error_message() ) . '</p></div>';
                 } else {
-                    echo '<div class="notice notice-success"><p>Email de teste enviado para <strong>' . esc_html( $test_email ) . '</strong>! Verifique sua caixa (e spam).</p></div>';
+                    echo '<div class="notice notice-success"><p>Email de teste (aprovação) enviado para <strong>' . esc_html( $test_email ) . '</strong>!</p></div>';
+                }
+            }
+        }
+
+        if ( $action === 'send_test_submission' ) {
+            $test_email = sanitize_email( wp_unslash( $_POST['test_email_submission'] ?? '' ) );
+            if ( ! is_email( $test_email ) ) {
+                echo '<div class="notice notice-error"><p>Informe um email de teste válido.</p></div>';
+            } else {
+                $sample_post = get_posts( array(
+                    'post_type'   => 'clientes',
+                    'post_status' => array( 'publish', 'draft', 'pending', 'any' ),
+                    'numberposts' => 1,
+                    'fields'      => 'ids',
+                    'orderby'     => 'ID',
+                    'order'       => 'DESC',
+                ) );
+
+                if ( empty( $sample_post ) ) {
+                    // Sem ficha - usa dados fictícios
+                    $result = cbv_ae_send_submission_test_fake( $test_email );
+                } else {
+                    $result = cbv_ae_send_submission( $sample_post[0], $test_email );
+                }
+
+                if ( is_wp_error( $result ) ) {
+                    echo '<div class="notice notice-error"><p>Falha no envio (submissão): ' . esc_html( $result->get_error_message() ) . '</p></div>';
+                } else {
+                    echo '<div class="notice notice-success"><p>Email de teste (submissão) enviado para <strong>' . esc_html( $test_email ) . '</strong>!</p></div>';
                 }
             }
         }
@@ -328,34 +494,38 @@ function cbv_ae_render_page() {
 
     ?>
     <div class="wrap">
-        <h1>Email de Aprovação</h1>
+        <h1>Emails - CBV</h1>
 
-        <?php if ( empty( $settings['enabled'] ) ) : ?>
-            <div class="notice notice-warning"><p><strong>Envio automático está DESATIVADO.</strong> Nenhum email será enviado ao aprovar fichas. Ative abaixo para começar.</p></div>
-        <?php else : ?>
-            <div class="notice notice-success"><p><strong>Envio automático ATIVO.</strong> Ativado em: <?php echo $settings['activated_at'] ? esc_html( wp_date( 'd/m/Y H:i', $settings['activated_at'] ) ) : '—'; ?></p></div>
-        <?php endif; ?>
+        <div style="display:flex; gap:15px; margin-bottom:20px;">
+            <div style="flex:1; padding:12px; border-radius:5px; background:<?php echo $settings['enabled'] ? '#d1e7dd' : '#fff3cd'; ?>;">
+                <strong>Email de Aprovação:</strong>
+                <?php if ( empty( $settings['enabled'] ) ) : ?>
+                    DESATIVADO
+                <?php else : ?>
+                    ATIVO (desde <?php echo $settings['activated_at'] ? esc_html( wp_date( 'd/m/Y H:i', $settings['activated_at'] ) ) : '—'; ?>)
+                <?php endif; ?>
+            </div>
+            <div style="flex:1; padding:12px; border-radius:5px; background:<?php echo $settings['submission_enabled'] ? '#d1e7dd' : '#fff3cd'; ?>;">
+                <strong>Email de Submissão:</strong>
+                <?php if ( empty( $settings['submission_enabled'] ) ) : ?>
+                    DESATIVADO
+                <?php else : ?>
+                    ATIVO (desde <?php echo ! empty( $settings['submission_activated_at'] ) ? esc_html( wp_date( 'd/m/Y H:i', $settings['submission_activated_at'] ) ) : '—'; ?>)
+                <?php endif; ?>
+            </div>
+        </div>
 
         <form method="post">
             <?php wp_nonce_field( 'cbv_ae_config' ); ?>
             <input type="hidden" name="cbv_ae_action" value="save">
 
+            <h2>Configurações Gerais (remetente)</h2>
             <table class="form-table">
-                <tr>
-                    <th><label for="enabled">Ativar envio automático</label></th>
-                    <td>
-                        <label>
-                            <input type="checkbox" name="enabled" id="enabled" value="1" <?php checked( $settings['enabled'], 1 ); ?>>
-                            Enviar email automaticamente quando uma ficha for aprovada
-                        </label>
-                        <p class="description">Quando desligado, nenhum email é enviado - mesmo ao aprovar fichas.</p>
-                    </td>
-                </tr>
                 <tr>
                     <th><label for="from_email">Email do remetente (From)</label></th>
                     <td>
                         <input type="email" name="from_email" id="from_email" value="<?php echo esc_attr( $settings['from_email'] ); ?>" class="regular-text">
-                        <p class="description">Use um email do mesmo domínio do site (ex: resposta-formulario@visageducation.com).</p>
+                        <p class="description">Usado em TODOS os emails (aprovação e submissão). Ex: resposta-formulario@visageducation.com</p>
                     </td>
                 </tr>
                 <tr>
@@ -364,8 +534,60 @@ function cbv_ae_render_page() {
                         <input type="text" name="from_name" id="from_name" value="<?php echo esc_attr( $settings['from_name'] ); ?>" class="regular-text">
                     </td>
                 </tr>
+            </table>
+
+            <hr>
+
+            <h2>Email de Submissão <span style="font-size:13px; color:#666; font-weight:normal;">(quando a ficha é criada - formulário WPForms ou admin)</span></h2>
+            <table class="form-table">
                 <tr>
-                    <th><label for="subject">Assunto do email</label></th>
+                    <th><label for="submission_enabled">Ativar envio automático</label></th>
+                    <td>
+                        <label>
+                            <input type="checkbox" name="submission_enabled" id="submission_enabled" value="1" <?php checked( $settings['submission_enabled'], 1 ); ?>>
+                            Enviar email ao aluno quando a ficha for criada (agradecimento / aguarde aprovação)
+                        </label>
+                        <p class="description">Dispara uma vez por ficha, não envia para fichas criadas pelo CSV Sync.</p>
+                    </td>
+                </tr>
+                <tr>
+                    <th><label for="submission_subject">Assunto</label></th>
+                    <td>
+                        <input type="text" name="submission_subject" id="submission_subject" value="<?php echo esc_attr( $settings['submission_subject'] ); ?>" class="large-text">
+                    </td>
+                </tr>
+                <tr>
+                    <th><label for="submission_message">Mensagem (aceita HTML)</label></th>
+                    <td>
+                        <textarea name="submission_message" id="submission_message" rows="12" class="large-text code"><?php echo esc_textarea( $settings['submission_message'] ); ?></textarea>
+                        <p class="description">
+                            <strong>Variáveis:</strong>
+                            <code>{nome}</code>
+                            <code>{email}</code>
+                            <code>{cidade}</code>
+                            <code>{estado}</code>
+                            <code>{instagram}</code>
+                        </p>
+                    </td>
+                </tr>
+            </table>
+
+            <hr>
+
+            <h2>Email de Aprovação <span style="font-size:13px; color:#666; font-weight:normal;">(quando admin aprova a ficha)</span></h2>
+            <table class="form-table">
+                <tr>
+                    <th><label for="enabled">Ativar envio automático</label></th>
+                    <td>
+                        <label>
+                            <input type="checkbox" name="enabled" id="enabled" value="1" <?php checked( $settings['enabled'], 1 ); ?>>
+                            Enviar email ao aluno quando a ficha for aprovada
+                        </label>
+                        <p class="description">Não envia para fichas criadas pelo CSV Sync.</p>
+                    </td>
+                </tr>
+                <tr>
+                    <th><label for="subject">Assunto</label></th>
                     <td>
                         <input type="text" name="subject" id="subject" value="<?php echo esc_attr( $settings['subject'] ); ?>" class="large-text">
                     </td>
@@ -373,9 +595,9 @@ function cbv_ae_render_page() {
                 <tr>
                     <th><label for="message">Mensagem (aceita HTML)</label></th>
                     <td>
-                        <textarea name="message" id="message" rows="14" class="large-text code"><?php echo esc_textarea( $settings['message'] ); ?></textarea>
+                        <textarea name="message" id="message" rows="12" class="large-text code"><?php echo esc_textarea( $settings['message'] ); ?></textarea>
                         <p class="description">
-                            <strong>Variáveis disponíveis:</strong>
+                            <strong>Variáveis:</strong>
                             <code>{nome}</code>
                             <code>{email}</code>
                             <code>{cbv}</code>
@@ -383,30 +605,41 @@ function cbv_ae_render_page() {
                             <code>{cidade}</code>
                             <code>{estado}</code>
                         </p>
-                        <p class="description">
-                            <strong>Dica:</strong> você pode usar tags HTML como <code>&lt;h2&gt;</code>, <code>&lt;p&gt;</code>, <code>&lt;strong&gt;</code>, <code>&lt;a href=""&gt;</code>, <code>&lt;br&gt;</code>, <code>&lt;img&gt;</code>, etc.
-                            Para estilos use <code>style="..."</code> direto no elemento (ex: <code>&lt;p style="color: blue;"&gt;...&lt;/p&gt;</code>).
-                            Quebra de linha: use <code>&lt;br&gt;</code> ou <code>&lt;/p&gt;&lt;p&gt;</code>.
-                        </p>
                     </td>
                 </tr>
             </table>
 
             <p class="submit">
-                <button type="submit" class="button button-primary">Salvar alterações</button>
+                <button type="submit" class="button button-primary">Salvar todas as configurações</button>
             </p>
         </form>
 
         <hr>
 
-        <h2>Enviar email de teste</h2>
-        <p>Envia um email de teste usando a ficha mais recente (aprovada, pendente ou rascunho). Se não houver nenhuma ficha, usa dados fictícios.</p>
-        <form method="post">
-            <?php wp_nonce_field( 'cbv_ae_config' ); ?>
-            <input type="hidden" name="cbv_ae_action" value="send_test">
-            <input type="email" name="test_email" placeholder="seu-email@teste.com" class="regular-text" required>
-            <button type="submit" class="button">Enviar teste</button>
-        </form>
+        <h2>Enviar emails de teste</h2>
+        <p>Envia email de teste usando a ficha mais recente. Se não houver nenhuma, usa dados fictícios.</p>
+
+        <div style="display:flex; gap:15px;">
+            <div style="flex:1; padding:15px; border:1px solid #ccd0d4; border-radius:5px;">
+                <h3 style="margin-top:0;">Teste - Email de Aprovação</h3>
+                <form method="post">
+                    <?php wp_nonce_field( 'cbv_ae_config' ); ?>
+                    <input type="hidden" name="cbv_ae_action" value="send_test">
+                    <input type="email" name="test_email" placeholder="seu-email@teste.com" class="regular-text" required>
+                    <button type="submit" class="button">Enviar teste de aprovação</button>
+                </form>
+            </div>
+
+            <div style="flex:1; padding:15px; border:1px solid #ccd0d4; border-radius:5px;">
+                <h3 style="margin-top:0;">Teste - Email de Submissão</h3>
+                <form method="post">
+                    <?php wp_nonce_field( 'cbv_ae_config' ); ?>
+                    <input type="hidden" name="cbv_ae_action" value="send_test_submission">
+                    <input type="email" name="test_email_submission" placeholder="seu-email@teste.com" class="regular-text" required>
+                    <button type="submit" class="button">Enviar teste de submissão</button>
+                </form>
+            </div>
+        </div>
 
         <hr>
 
@@ -494,6 +727,43 @@ function cbv_ae_send_test_with_fake_data( $test_email ) {
         'email'   => $test_email,
         'status'  => $sent ? 'sent' : 'error',
         'reason'  => $sent ? 'Email de teste (dados fictícios) enviado.' : 'Falha ao enviar email de teste.',
+    ) );
+
+    return $sent ? true : new WP_Error( 'send_failed', 'wp_mail() falhou' );
+}
+
+/**
+ * Envia email de teste de SUBMISSÃO com dados fictícios (sem ficha existente).
+ */
+function cbv_ae_send_submission_test_fake( $test_email ) {
+    $settings = cbv_ae_get_settings();
+
+    $replacements = array(
+        '{nome}'      => 'João Silva (teste)',
+        '{email}'     => $test_email,
+        '{cidade}'    => 'São Paulo',
+        '{estado}'    => 'São Paulo - SP',
+        '{cbv}'       => 'CBV - 000000',
+        '{instagram}' => '@joaosilva',
+    );
+
+    $subject = '[TESTE] ' . strtr( $settings['submission_subject'], $replacements );
+    $message = '<p style="background:#fff3cd; color:#664d03; padding:10px; border-radius:4px; font-family:Arial,sans-serif;"><strong>[Este é um email de teste com dados fictícios]</strong></p>' . strtr( $settings['submission_message'], $replacements );
+
+    $headers = array();
+    if ( ! empty( $settings['from_email'] ) && is_email( $settings['from_email'] ) ) {
+        $from_name = $settings['from_name'] ?: 'Visage Education';
+        $headers[] = 'From: ' . $from_name . ' <' . $settings['from_email'] . '>';
+    }
+    $headers[] = 'Content-Type: text/html; charset=UTF-8';
+
+    $sent = wp_mail( $test_email, $subject, $message, $headers );
+
+    cbv_ae_log( array(
+        'post_id' => 0,
+        'email'   => $test_email,
+        'status'  => $sent ? 'sent' : 'error',
+        'reason'  => $sent ? 'Email de submissão de teste (fictício) enviado.' : 'Falha ao enviar teste de submissão.',
     ) );
 
     return $sent ? true : new WP_Error( 'send_failed', 'wp_mail() falhou' );
