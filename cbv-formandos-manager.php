@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CBV Formandos Manager
  * Description: Gerencia o cadastro e aprovação de formandos da Formação Barbeiro Visagista (CBV).
- * Version: 1.2.0
+ * Version: 1.3.0
  * Author: Visage Education
  * Text Domain: cbv-formandos
  * Domain Path: /languages
@@ -14,7 +14,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 define( 'CBV_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'CBV_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
-define( 'CBV_VERSION', '1.2.0' );
+define( 'CBV_VERSION', '1.3.0' );
 
 // ============================================================
 // GERAÇÃO AUTOMÁTICA DE CBV ÚNICO
@@ -568,6 +568,54 @@ function cbv_sync_taxonomies( $post_id ) {
     }
 }
 
+/**
+ * Dispara o evento 'cbv_formando_submitted' quando uma ficha NOVA é criada
+ * pelo admin via meta box (painel WordPress).
+ *
+ * Regras:
+ * - Só para submissões do meta box (tem nonce cbv_meta_nonce)
+ * - Só para fichas NOVAS (idade < 2 min)
+ * - Só dispara UMA vez por ficha (flag _cbv_submission_event_fired)
+ * - Nunca dispara para fichas do CSV Sync
+ */
+add_action( 'save_post_clientes', 'cbv_fire_submission_event_on_admin_create', 90, 3 );
+
+function cbv_fire_submission_event_on_admin_create( $post_id, $post, $update ) {
+    // Só submissões do meta box
+    if ( ! isset( $_POST['cbv_meta_nonce'] ) || ! wp_verify_nonce( $_POST['cbv_meta_nonce'], 'cbv_save_meta' ) ) {
+        return;
+    }
+
+    if ( defined( 'DOING_AUTOSAVE' ) && DOING_AUTOSAVE ) {
+        return;
+    }
+    if ( wp_is_post_revision( $post_id ) || wp_is_post_autosave( $post_id ) ) {
+        return;
+    }
+
+    // Exclui fichas do CSV Sync
+    $source = get_post_meta( $post_id, '_cbv_source', true );
+    if ( $source === 'csv_sync' ) {
+        return;
+    }
+
+    // Só dispara para posts novos (< 2 min de idade)
+    $post_time = get_post_time( 'U', true, $post_id );
+    $age       = time() - $post_time;
+    if ( $age > 120 ) {
+        return;
+    }
+
+    // Dispara apenas uma vez
+    $fired = get_post_meta( $post_id, '_cbv_submission_event_fired', true );
+    if ( ! empty( $fired ) ) {
+        return;
+    }
+    update_post_meta( $post_id, '_cbv_submission_event_fired', '1' );
+
+    do_action( 'cbv_formando_submitted', $post_id, 'admin' );
+}
+
 // ============================================================
 // 4. VALIDAÇÃO - BLOQUEAR PUBLICAÇÃO SEM CBV
 // ============================================================
@@ -808,6 +856,10 @@ function cbv_create_formando_from_fields( $fields, $entry_id, $source = '' ) {
         'entry_id' => $entry_id,
         'source'   => $source,
     ) );
+
+    // Dispara evento para outros plugins (ex: cbv-approval-email) ouvirem
+    // e enviarem email de confirmação de submissão ao aluno.
+    do_action( 'cbv_formando_submitted', $post_id, 'wpforms' );
 
     return $post_id;
 }
